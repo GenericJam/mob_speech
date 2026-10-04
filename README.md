@@ -78,6 +78,12 @@ def handle_info({:speech, :error, reason}, socket), do: ...
 | `available?(engine \\ :platform)` | boolean | `false` on a host build without the NIF. On iOS it stays `false` until speech recognition is authorised. |
 | `permissions(engine \\ :platform)` | `[atom]` | capabilities to request first. |
 
+A press shorter than ~300 ms has nothing to recognise. Android's recogniser
+usually answers it with `:client` or `:no_speech`, so hold-to-talk apps should
+cancel very short presses themselves. On Android, the platform engine also
+takes `silence_ms:` (default 10 000), so a pause while the button is held
+doesn't end the recognition.
+
 These guarantees hold for every engine:
 
 - After a final or an error you get exactly one `{:speech, :state, :idle}`,

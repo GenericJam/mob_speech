@@ -55,7 +55,7 @@ defmodule MobSpeechTest do
   end
 
   describe "NIF stub agreement" do
-    @stub_nifs [speech_start: 4, speech_stop: 1, speech_cancel: 1, speech_available: 0]
+    @stub_nifs [speech_start: 5, speech_stop: 1, speech_cancel: 1, speech_available: 0]
 
     # Guards the .erl stub / manifest, not app code — VacuousTest can't see that.
     # credo:disable-for-next-line Jump.CredoChecks.VacuousTest
@@ -100,6 +100,29 @@ defmodule MobSpeechTest do
 
       for n <- thunks, do: assert(kt =~ "external fun #{n}(", "Kotlin lacks external #{n}")
       for n <- cached, do: assert(kt =~ "fun #{n}(", "Kotlin lacks bridge method #{n}")
+    end
+
+    # A signature drift leaves the cached method id null on device, and the
+    # NIF then returns :ok while doing nothing — VacuousTest can't see that.
+    # credo:disable-for-next-line Jump.CredoChecks.VacuousTest
+    test "every cached JNI signature matches the Kotlin method's parameter types" do
+      zig = File.read!(Path.join(@plugin_dir, "priv/native/jni/mob_speech_nif.zig"))
+      kt = File.read!(Path.join(@plugin_dir, "priv/native/android/MobSpeechBridge.kt"))
+
+      jni = %{"Long" => "J", "String" => "Ljava/lang/String;", "Boolean" => "Z", "Int" => "I"}
+
+      for [_, name, sig] <- Regex.scan(~r/cacheMethod\(jenv, cls, "(\w+)", "([^"]+)"\)/, zig) do
+        [_, params | ret] = Regex.run(~r/fun #{name}\(([^)]*)\)(?::\s*(\w+))?/, kt)
+
+        args =
+          for p <- String.split(params, ",", trim: true),
+              [_, type] = Regex.run(~r/:\s*(\w+)/, p),
+              into: "",
+              do: Map.fetch!(jni, type)
+
+        ret = if ret in [[], [""]], do: "V", else: Map.fetch!(jni, hd(ret))
+        assert sig == "(#{args})#{ret}", "#{name}: zig #{sig} vs Kotlin (#{args})#{ret}"
+      end
     end
 
     # Guards the .erl stub / manifest, not app code — VacuousTest can't see that.

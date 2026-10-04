@@ -70,7 +70,7 @@ defmodule MobSpeech do
   under `assigns.mob_speech`, so `stop/1` and `cancel/1` reach it.
 
   Listening again while this socket already has a session cancels the old one
-  first (its target gets idle).
+  first: its target gets its idle before any event of the new session.
 
   Options:
 
@@ -110,7 +110,9 @@ defmodule MobSpeech do
 
   @doc """
   Abort listening: `{:speech, :state, :idle}`, no final. A no-op when nothing
-  is listening.
+  is listening. Returns once the idle has been sent (waiting at most 1 s for
+  an engine that is busy in a callback), so it is already in the target's
+  mailbox when the target is the caller.
   """
   @spec cancel(Mob.Socket.t()) :: Mob.Socket.t()
   def cancel(socket) do
@@ -191,8 +193,10 @@ defmodule MobSpeech do
 
   defp language!(lang) when is_binary(lang) do
     # BCP-47: a 2-8 letter primary subtag, then alphanumeric subtags of 1-8
-    # chars, hyphen-separated ("en", "en-US", "zh-Hant-TW", "sr-Latn").
-    if Regex.match?(~r/\A[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*\z/, lang) do
+    # chars, hyphen-separated ("en", "en-US", "zh-Hant-TW", "sr-Latn"), at
+    # most 35 chars (RFC 5646's recommended buffer size; the native layers
+    # copy it into a fixed buffer).
+    if byte_size(lang) <= 35 and Regex.match?(~r/\A[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*\z/, lang) do
       lang
     else
       raise ArgumentError,
@@ -212,18 +216,22 @@ defmodule MobSpeech do
   end
 
   defp stop_timeout!(opts, engine) do
-    case Keyword.fetch(opts, :stop_timeout_ms) do
-      {:ok, ms} when is_integer(ms) and ms >= 0 ->
-        ms
+    {source, ms} =
+      case Keyword.fetch(opts, :stop_timeout_ms) do
+        {:ok, ms} -> {":stop_timeout_ms", ms}
+        :error -> engine_stop_timeout(engine)
+      end
 
-      {:ok, other} ->
-        raise ArgumentError,
-              ":stop_timeout_ms must be a non-negative integer, got: #{inspect(other)}"
-
-      :error ->
-        if function_exported?(engine, :stop_timeout_ms, 0),
-          do: engine.stop_timeout_ms(),
-          else: Session.default_stop_timeout_ms()
+    if is_integer(ms) and ms >= 0 do
+      ms
+    else
+      raise ArgumentError, "#{source} must be a non-negative integer, got: #{inspect(ms)}"
     end
+  end
+
+  defp engine_stop_timeout(engine) do
+    if function_exported?(engine, :stop_timeout_ms, 0),
+      do: {"#{inspect(engine)}.stop_timeout_ms/0", engine.stop_timeout_ms()},
+      else: {"default", Session.default_stop_timeout_ms()}
   end
 end

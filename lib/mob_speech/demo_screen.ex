@@ -79,7 +79,10 @@ defmodule MobSpeech.DemoScreen do
     {:noreply, socket |> MobSpeech.listen() |> reset()}
   end
 
-  def handle_info({:permission, :speech, _status}, socket) do
+  # A second result (Listen tapped twice) once the first already started.
+  def handle_info({:permission, :speech, :granted}, socket), do: {:noreply, socket}
+
+  def handle_info({:permission, :speech, :denied}, socket) do
     {:noreply, Mob.Socket.assign(socket, pending: false, error: :permission)}
   end
 

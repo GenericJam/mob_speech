@@ -48,11 +48,17 @@ defmodule MobSpeech.Session do
           | {:speech, :final, String.t()}
           | {:speech, :error, Reason.t()}
 
+  @typedoc "Who to tell once a cancel has emitted its idle: `{pid, tag}` or `nil`."
+  @type ack :: {pid(), reference()} | nil
+
   @type input ::
-          {:engine, term()} | :stop | :cancel | :watchdog | :target_down
+          {:engine, term()} | :stop | {:cancel, ack()} | :watchdog | :target_down
 
   @type effect ::
-          {:emit, event()} | {:engine, :stop | :cancel} | {:watchdog, non_neg_integer()}
+          {:emit, event()}
+          | {:ack, {pid(), reference()}}
+          | {:engine, :stop | :cancel}
+          | {:watchdog, non_neg_integer()}
 
   @doc "The stop watchdog used when neither the caller nor the engine sets one."
   @spec default_stop_timeout_ms() :: pos_integer()
@@ -81,12 +87,12 @@ defmodule MobSpeech.Session do
     end
   end
 
+  # The engine ended with nothing to report (it was aborted, e.g. preempted by
+  # a newer recognition). After a stop, whatever was heard is still the final.
   def handle(s, {:engine, {:speech, :state, :idle}}) do
-    cond do
-      s.phase == :stopping and s.last_partial != "" -> finish(s, {:final, s.last_partial})
-      s.phase == :stopping -> finish(s, {:error, :no_speech})
-      true -> finish(s, :none)
-    end
+    if s.phase == :stopping and s.last_partial != "",
+      do: finish(s, {:final, s.last_partial}),
+      else: finish(s, :none)
   end
 
   def handle(s, {:engine, {:speech, :partial, text}}) when is_binary(text) do
@@ -124,15 +130,19 @@ defmodule MobSpeech.Session do
      ]}
   end
 
-  def handle(s, :cancel) do
+  # Cancel: idle to the screen first, then (optionally) the canceller's ack,
+  # then the engine call — a slow or failing engine.cancel/1 can't hold back
+  # or swallow the idle.
+  def handle(s, {:cancel, ack}) do
     {s, effects} = finish(s, :none)
-    {s, [{:engine, :cancel} | effects]}
+    acks = if ack, do: [{:ack, ack}], else: []
+    {s, effects ++ acks ++ [{:engine, :cancel}]}
   end
 
   def handle(%__MODULE__{phase: :stopping} = s, :watchdog) do
     outcome = if s.last_partial != "", do: {:final, s.last_partial}, else: {:error, :no_speech}
     {s, effects} = finish(s, outcome)
-    {s, [{:engine, :cancel} | effects]}
+    {s, effects ++ [{:engine, :cancel}]}
   end
 
   def handle(s, :target_down), do: {%{s | phase: :done}, [{:engine, :cancel}]}
@@ -177,66 +187,112 @@ defmodule MobSpeech.Session do
     :ok
   end
 
-  @doc "Ask a session to cancel (idle, no final). No-op once it has ended."
-  @spec cancel(pid()) :: :ok
-  def cancel(session) do
-    send(session, {:mob_speech, :cancel})
+  @doc """
+  Cancel a session (idle, no final) and wait until it has sent the idle, so
+  any event a newer session sends to the same target arrives after it. Waits
+  at most `timeout` ms; returns at once if the session already ended.
+  """
+  @spec cancel(pid(), timeout()) :: :ok
+  def cancel(session, timeout \\ 1_000) do
+    mref = Process.monitor(session)
+    send(session, {:mob_speech, :cancel, {self(), mref}})
+
+    receive do
+      {^mref, :cancelled} -> :ok
+      {:DOWN, ^mref, :process, _, _} -> :ok
+    after
+      timeout -> :ok
+    end
+
+    Process.demonitor(mref, [:flush])
     :ok
   end
 
   defp init(target, engine, opts) do
     ref = Process.monitor(target)
-    state = new(opts)
+    ctx = %{target: target, engine: engine, ref: ref}
 
     case call_engine(fn -> engine.start(self(), opts) end) do
-      :ok -> loop(state, target, engine, ref)
-      {:error, reason} -> step(state, {:engine, {:speech, :error, reason}}, target, engine, ref)
+      :ok ->
+        loop(new(opts), ctx)
+
+      {:error, reason} ->
+        step(new(opts), {:engine, {:speech, :error, reason}}, ctx)
+
+      other ->
+        Logger.error("mob_speech engine #{inspect(engine)}.start/2 returned #{inspect(other)}")
+        step(new(opts), {:engine, {:speech, :error, :client}}, ctx)
     end
   end
 
-  defp loop(state, target, engine, ref) do
+  defp loop(state, %{ref: ref} = ctx) do
     receive do
-      {:speech, _, _} = msg -> step(state, {:engine, msg}, target, engine, ref)
-      {:mob_speech, :stop} -> step(state, :stop, target, engine, ref)
-      {:mob_speech, :cancel} -> step(state, :cancel, target, engine, ref)
-      {:mob_speech, :watchdog} -> step(state, :watchdog, target, engine, ref)
-      {:DOWN, ^ref, :process, _, _} -> step(state, :target_down, target, engine, ref)
-      _other -> loop(state, target, engine, ref)
+      {:speech, _, _} = msg -> step(state, {:engine, msg}, ctx)
+      {:mob_speech, :stop} -> step(state, :stop, ctx)
+      {:mob_speech, :cancel, ack} -> step(state, {:cancel, ack}, ctx)
+      {:mob_speech, :watchdog} -> step(state, :watchdog, ctx)
+      {:DOWN, ^ref, :process, _, _} -> step(state, :target_down, ctx)
+      _other -> loop(state, ctx)
     end
   end
 
-  defp step(state, input, target, engine, ref) do
+  defp step(state, input, ctx) do
     {state, effects} = handle(state, input)
-    Enum.each(effects, &run(&1, target, engine))
-    if state.phase == :done, do: :ok, else: loop(state, target, engine, ref)
+
+    case Enum.flat_map(effects, &run(&1, ctx)) do
+      # engine.stop/1 failed: it will never deliver, so that is the outcome.
+      [followup | _] -> step(state, followup, ctx)
+      [] -> if state.phase == :done, do: :ok, else: loop(state, ctx)
+    end
   end
 
-  defp run({:emit, event}, target, _engine), do: send(target, event)
-  defp run({:engine, :stop}, _target, engine), do: call_engine(fn -> engine.stop(self()) end)
-  defp run({:engine, :cancel}, _target, engine), do: call_engine(fn -> engine.cancel(self()) end)
+  defp run({:emit, event}, %{target: target}) do
+    send(target, event)
+    []
+  end
 
-  defp run({:watchdog, ms}, _target, _engine),
-    do: Process.send_after(self(), {:mob_speech, :watchdog}, ms)
+  defp run({:ack, {pid, tag}}, _ctx) do
+    send(pid, {tag, :cancelled})
+    []
+  end
 
-  # The target must always get its idle, so an engine that raises (or a
-  # platform engine on a build without the native NIF linked) becomes an
-  # error instead of a dead session.
+  defp run({:engine, :stop}, %{engine: engine}) do
+    case call_engine(fn -> engine.stop(self()) end) do
+      {:error, reason} -> [{:engine, {:speech, :error, reason}}]
+      _ -> []
+    end
+  end
+
+  defp run({:engine, :cancel}, %{engine: engine}) do
+    call_engine(fn -> engine.cancel(self()) end)
+    []
+  end
+
+  defp run({:watchdog, ms}, _ctx) do
+    Process.send_after(self(), {:mob_speech, :watchdog}, ms)
+    []
+  end
+
+  # The target must always get its idle, so an engine callback that raises,
+  # exits (e.g. a GenServer.call timeout or :noproc) or throws becomes an
+  # error instead of a dead session. A platform engine on a build without the
+  # native NIF linked is :unavailable.
   defp call_engine(fun) do
     fun.()
   rescue
     e in ErlangError ->
-      if e.original == :nif_not_loaded do
-        {:error, :unavailable}
-      else
-        engine_crash(e, __STACKTRACE__)
-      end
+      if e.original == :nif_not_loaded,
+        do: {:error, :unavailable},
+        else: engine_crash(:error, e, __STACKTRACE__)
 
     e ->
-      engine_crash(e, __STACKTRACE__)
+      engine_crash(:error, e, __STACKTRACE__)
+  catch
+    kind, reason -> engine_crash(kind, reason, __STACKTRACE__)
   end
 
-  defp engine_crash(e, stacktrace) do
-    Logger.error("mob_speech engine raised: " <> Exception.format(:error, e, stacktrace))
+  defp engine_crash(kind, reason, stacktrace) do
+    Logger.error("mob_speech engine failed: " <> Exception.format(kind, reason, stacktrace))
     {:error, :client}
   end
 end

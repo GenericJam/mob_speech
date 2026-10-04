@@ -51,7 +51,7 @@ inline fn cacheMethod(
 export fn Java_io_mob_speech_MobSpeechBridge_nativeRegister(jenv: *jni.JNIEnv, cls: jni.JClass) callconv(.c) void {
     g_speech_cls = jni.newGlobalRef(jenv, cls);
     if (g_speech_cls == null) return;
-    g_speech.start = cacheMethod(jenv, cls, "speech_start", "(JLjava/lang/String;ZZ)V");
+    g_speech.start = cacheMethod(jenv, cls, "speech_start", "(JLjava/lang/String;ZZI)V");
     g_speech.stop = cacheMethod(jenv, cls, "speech_stop", "(J)V");
     g_speech.cancel = cacheMethod(jenv, cls, "speech_cancel", "(J)V");
     g_speech.available = cacheMethod(jenv, cls, "speech_available", "()Z");
@@ -145,7 +145,8 @@ fn callPidOnly(env: ?*erts.ErlNifEnv, method: jni.JMethodID, pid: erts.ErlNifPid
     return erts.ok(env);
 }
 
-// speech_start(Pid, Language :: binary, PreferOffline :: boolean, Partial :: boolean)
+// speech_start(Pid, Language :: binary, PreferOffline :: boolean, Partial :: boolean,
+//              SilenceMs :: non_neg_integer)
 fn nif_speech_start(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_NIF_TERM) callconv(.c) erts.ERL_NIF_TERM {
     _ = argc;
     const pid = pidArg(env, argv[0]) orelse return erts.badarg(env);
@@ -153,6 +154,8 @@ fn nif_speech_start(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_
     if (erts.enif_inspect_binary(env, argv[1], &lang_bin) == 0) return erts.badarg(env);
     const offline = boolArg(env, argv[2]) orelse return erts.badarg(env);
     const partial = boolArg(env, argv[3]) orelse return erts.badarg(env);
+    var silence_ms: c_int = 0;
+    if (erts.enif_get_int(env, argv[4], &silence_ms) == 0 or silence_ms < 0) return erts.badarg(env);
 
     var lang_buf: [64]u8 = @splat(0);
     if (lang_bin.size >= lang_buf.len) return erts.badarg(env);
@@ -164,7 +167,7 @@ fn nif_speech_start(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_
     var attached: c_int = 0;
     const jenv = get_jenv(&attached) orelse return erts.errorTuple(env, erts.atom(env, "unavailable"));
     const jlang = jni.newStringUTF(jenv, jni.asCStr(&lang_buf));
-    jenv.*.CallStaticVoidMethod.?(jenv, g_speech_cls, g_speech.start, pidToJlong(pid), jlang, offline, partial);
+    jenv.*.CallStaticVoidMethod.?(jenv, g_speech_cls, g_speech.start, pidToJlong(pid), jlang, offline, partial, silence_ms);
     jni.exceptionClear(jenv);
     if (jlang != null) jni.deleteLocalRef(jenv, jlang);
     detachIfAttached(attached);
@@ -204,7 +207,7 @@ fn nifLoad(env: ?*erts.ErlNifEnv, priv: *?*anyopaque, info: erts.ERL_NIF_TERM) c
 }
 
 const nif_funcs = [_]erts.ErlNifFunc{
-    .{ .name = "speech_start", .arity = 4, .fptr = nif_speech_start, .flags = 0 },
+    .{ .name = "speech_start", .arity = 5, .fptr = nif_speech_start, .flags = 0 },
     .{ .name = "speech_stop", .arity = 1, .fptr = nif_speech_stop, .flags = 0 },
     .{ .name = "speech_cancel", .arity = 1, .fptr = nif_speech_cancel, .flags = 0 },
     .{ .name = "speech_available", .arity = 0, .fptr = nif_speech_available, .flags = 0 },

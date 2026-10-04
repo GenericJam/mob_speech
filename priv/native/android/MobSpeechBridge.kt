@@ -93,9 +93,18 @@ object MobSpeechBridge : io.mob.plugin.MobActivityAware, io.mob.plugin.MobPermis
     }
 
     @JvmStatic
-    fun speech_start(pid: Long, language: String, preferOffline: Boolean, partialResults: Boolean) {
-        main.post { start(pid, language, preferOffline, partialResults) }
+    fun speech_start(pid: Long, language: String, preferOffline: Boolean, partialResults: Boolean, silenceMs: Int) {
+        val opts = StartOptions(language, preferOffline, partialResults, silenceMs)
+        main.post { start(pid, opts) }
     }
+
+    private class StartOptions(
+        val language: String,
+        val preferOffline: Boolean,
+        val partialResults: Boolean,
+        // End-of-utterance silence; 0 = the recogniser's default.
+        val silenceMs: Int,
+    )
 
     @JvmStatic
     fun speech_stop(pid: Long) {
@@ -123,7 +132,7 @@ object MobSpeechBridge : io.mob.plugin.MobActivityAware, io.mob.plugin.MobPermis
         }
     }
 
-    private fun start(pid: Long, language: String, preferOffline: Boolean, partialResults: Boolean) {
+    private fun start(pid: Long, opts: StartOptions) {
         val ctx = context() ?: return nativeDeliverError(pid, ERR_NO_CONTEXT, false)
         if (!hasMic(ctx)) return nativeDeliverError(pid, ERR_NO_PERMISSION, false)
         if (!SpeechRecognizer.isRecognitionAvailable(ctx)) {
@@ -145,24 +154,31 @@ object MobSpeechBridge : io.mob.plugin.MobActivityAware, io.mob.plugin.MobPermis
         destroyRecognizer()
         activePid = pid
         val wait = lastReleaseAt + SETTLE_MS - SystemClock.uptimeMillis()
-        val launch = Runnable {
-            if (activePid == pid) begin(ctx, pid, language, preferOffline, partialResults)
-        }
+        val launch = Runnable { if (activePid == pid) begin(ctx, pid, opts) }
         if (wait > 0) main.postDelayed(launch, wait) else launch.run()
     }
 
-    private fun begin(ctx: Context, pid: Long, language: String, preferOffline: Boolean, partialResults: Boolean) {
+    private fun begin(ctx: Context, pid: Long, opts: StartOptions) {
         val r = SpeechRecognizer.createSpeechRecognizer(ctx).also { recognizer = it }
         r.setRecognitionListener(Listener(pid, ctx))
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, partialResults)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, opts.partialResults)
             // Never true unless asked: a device without the on-device pack for
             // the locale fails at once with ERROR_LANGUAGE_UNAVAILABLE.
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, preferOffline)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, opts.preferOffline)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
-            if (language.isNotEmpty()) putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+            if (opts.language.isNotEmpty()) putExtra(RecognizerIntent.EXTRA_LANGUAGE, opts.language)
+            // Hold-to-talk: a pause while the button is held mustn't end the
+            // recognition. Some recogniser versions ignore these.
+            if (opts.silenceMs > 0) {
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, opts.silenceMs.toLong())
+                putExtra(
+                    RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                    opts.silenceMs.toLong(),
+                )
+            }
         }
         r.startListening(intent)
     }

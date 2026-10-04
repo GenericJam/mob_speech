@@ -112,7 +112,10 @@ defmodule MobSpeech.Reason do
   defp android(code, _) when code in [12, 13], do: :language
   defp android(code, _), do: {:unknown, code}
 
-  # SFSpeechErrorDomain (iOS 17+, SFErrors.h)
+  # SFSpeechErrorDomain (iOS 17+, SFErrors.h): 1 InternalServiceError,
+  # 2 AudioReadFailed, 12 Timeout. A timeout is mapped to :no_speech on
+  # purpose, so the session's last-partial fallback still delivers what was
+  # heard before it.
   defp ios("SFSpeechErrorDomain", 1), do: :server
   defp ios("SFSpeechErrorDomain", 2), do: :audio
   defp ios("SFSpeechErrorDomain", 12), do: :no_speech

@@ -5,7 +5,7 @@
  * mob_speech_nif via ERL_NIF_INIT; compiled as ObjC (-fobjc-arc) by the plugin
  * C-NIF path because the manifest entry is lang: :objc.
  *
- * Raw events go to the session pid passed to speech_start/4 (see
+ * Raw events go to the session pid passed to speech_start/5 (see
  * MobSpeech.Engine):
  *   {speech, state, listening | idle}
  *   {speech, partial | final, Binary}
@@ -279,13 +279,18 @@ static int get_bool(ErlNifEnv *env, ERL_NIF_TERM term, BOOL *out) {
 }
 
 // ── NIFs ──────────────────────────────────────────────────────────────────
+// speech_start(Pid, Language, PreferOffline, PartialResults, SilenceMs). SilenceMs
+// is Android-only (SFSpeechAudioBufferRecognitionRequest has no end-of-utterance
+// silence setting); it is validated and ignored here.
 static ERL_NIF_TERM nif_speech_start(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     ErlNifPid pid;
     ErlNifBinary lang_bin;
     BOOL offline, partial;
+    int silence_ms;
     if (!enif_get_local_pid(env, argv[0], &pid) || !enif_inspect_binary(env, argv[1], &lang_bin) ||
-        !get_bool(env, argv[2], &offline) || !get_bool(env, argv[3], &partial))
+        !get_bool(env, argv[2], &offline) || !get_bool(env, argv[3], &partial) ||
+        !enif_get_int(env, argv[4], &silence_ms) || silence_ms < 0)
         return enif_make_badarg(env);
     NSString *lang = [[NSString alloc] initWithBytes:lang_bin.data
                                               length:lang_bin.size
@@ -340,7 +345,7 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
 }
 
 static ErlNifFunc nif_funcs[] = {
-    {"speech_start", 4, nif_speech_start, 0},
+    {"speech_start", 5, nif_speech_start, 0},
     {"speech_stop", 1, nif_speech_stop, 0},
     {"speech_cancel", 1, nif_speech_cancel, 0},
     {"speech_available", 0, nif_speech_available, 0},

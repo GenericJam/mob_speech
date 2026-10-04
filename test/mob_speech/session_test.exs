@@ -140,11 +140,12 @@ defmodule MobSpeech.SessionTest do
         )
 
       assert {:watchdog, 50} in effects
-      assert {:engine, :cancel} in effects
 
-      assert Enum.take(emitted(effects), -2) == [
-               {:speech, :final, "so far"},
-               {:speech, :state, :idle}
+      # The screen hears first; the (possibly slow) engine call comes last.
+      assert Enum.take(effects, -3) == [
+               {:emit, {:speech, :final, "so far"}},
+               {:emit, {:speech, :state, :idle}},
+               {:engine, :cancel}
              ]
     end
 
@@ -164,13 +165,15 @@ defmodule MobSpeech.SessionTest do
       assert Enum.count(emitted(effects), &(&1 == {:speech, :state, :idle})) == 1
     end
 
-    test "cancel → idle, no final, engine cancelled; later events dropped" do
+    test "cancel → idle, no final; idle and ack precede the engine call; later events dropped" do
+      ack = {self(), make_ref()}
+
       effects =
         run([
           engine({:speech, :partial, "abc"}),
-          :cancel,
+          {:cancel, ack},
           engine({:speech, :final, "abc"}),
-          :cancel
+          {:cancel, nil}
         ])
 
       assert emitted(effects) == [
@@ -179,12 +182,27 @@ defmodule MobSpeech.SessionTest do
                {:speech, :state, :idle}
              ]
 
-      assert Enum.count(effects, &(&1 == {:engine, :cancel})) == 1
+      assert Enum.take(effects, -3) == [
+               {:emit, {:speech, :state, :idle}},
+               {:ack, ack},
+               {:engine, :cancel}
+             ]
     end
 
     test "a preempted recogniser (engine idle) ends with a bare idle" do
       effects = run([engine({:speech, :state, :listening}), engine({:speech, :state, :idle})])
       assert emitted(effects) == [{:speech, :state, :listening}, {:speech, :state, :idle}]
+    end
+
+    test "preempted after stop: the last partial is the final; nothing heard is a bare idle" do
+      heard = run([engine({:speech, :partial, "hi"}), :stop, engine({:speech, :state, :idle})])
+      assert Enum.take(emitted(heard), -2) == [{:speech, :final, "hi"}, {:speech, :state, :idle}]
+
+      silent =
+        run([engine({:speech, :state, :listening}), :stop, engine({:speech, :state, :idle})])
+
+      assert List.last(emitted(silent)) == {:speech, :state, :idle}
+      refute Enum.any?(emitted(silent), &match?({:speech, :error, _}, &1))
     end
 
     test "the screen dying cancels the engine silently" do
@@ -312,9 +330,107 @@ defmodule MobSpeech.SessionTest do
 
       s = MobSpeech.listen(s, engine: Fake, script: [:listening])
       assert_receive {:mob_speech_fake, :cancel, ^first}
-      assert_receive {:speech, :state, :idle}
+      # The old session's idle is in the mailbox before the new one's events.
+      assert_receive {:speech, _, _} = first_event
+      assert first_event == {:speech, :state, :idle}
       assert_receive {:speech, :state, :listening}
       refute s.assigns.mob_speech.session == first
+    end
+
+    defmodule FailingEngine do
+      @behaviour MobSpeech.Engine
+      # opts[:fail] picks the callback that fails and how (raise / exit / throw /
+      # a malformed return); the rest behave like a recogniser that is listening.
+      def start(pid, opts) do
+        Process.put(:fail, opts[:fail])
+
+        if match?({:start, _}, opts[:fail]),
+          do: fail(opts[:fail]),
+          else: send(pid, {:speech, :state, :listening})
+
+        :ok
+      end
+
+      def stop(_pid),
+        do: if(match?({:stop, _}, Process.get(:fail)), do: fail(Process.get(:fail)), else: :ok)
+
+      def cancel(_pid),
+        do: if(match?({:cancel, _}, Process.get(:fail)), do: fail(Process.get(:fail)), else: :ok)
+
+      def available?, do: true
+      def permissions, do: []
+
+      defp fail({_, :raise}), do: raise("boom")
+      defp fail({_, :exit}), do: exit({:noproc, {GenServer, :call, [:nowhere]}})
+      defp fail({_, :throw}), do: throw(:boom)
+    end
+
+    defp drain(acc \\ []) do
+      receive do
+        {:speech, _, _} = e -> drain([e | acc])
+      after
+        150 -> Enum.reverse(acc)
+      end
+    end
+
+    @tag capture_log: true
+    test "a start/2 that raises, exits or throws still ends with error + one idle", %{socket: s} do
+      for how <- [:raise, :exit, :throw] do
+        MobSpeech.listen(s, engine: FailingEngine, fail: {:start, how})
+        assert drain() == [{:speech, :error, :client}, {:speech, :state, :idle}], "#{how}"
+      end
+    end
+
+    @tag capture_log: true
+    test "a stop/1 that fails delivers error + one idle at once, not after the watchdog",
+         %{socket: s} do
+      for how <- [:raise, :exit, :throw] do
+        s =
+          MobSpeech.listen(s, engine: FailingEngine, fail: {:stop, how}, stop_timeout_ms: 60_000)
+
+        assert_receive {:speech, :state, :listening}
+        MobSpeech.stop(s)
+
+        assert drain() == [
+                 {:speech, :state, :processing},
+                 {:speech, :error, :client},
+                 {:speech, :state, :idle}
+               ],
+               "#{how}"
+      end
+    end
+
+    @tag capture_log: true
+    test "a cancel/1 that exits doesn't swallow the idle (cancel and watchdog)", %{socket: s} do
+      s = MobSpeech.listen(s, engine: FailingEngine, fail: {:cancel, :exit})
+      assert_receive {:speech, :state, :listening}
+      MobSpeech.cancel(s)
+      assert drain() == [{:speech, :state, :idle}]
+
+      s = MobSpeech.listen(s, engine: FailingEngine, fail: {:cancel, :exit}, stop_timeout_ms: 10)
+      assert_receive {:speech, :state, :listening}
+      MobSpeech.stop(s)
+
+      assert drain() == [
+               {:speech, :state, :processing},
+               {:speech, :error, :no_speech},
+               {:speech, :state, :idle}
+             ]
+    end
+
+    defmodule BadReturnEngine do
+      @behaviour MobSpeech.Engine
+      def start(_pid, _opts), do: {:ok, make_ref()}
+      def stop(_pid), do: :ok
+      def cancel(_pid), do: :ok
+      def available?, do: true
+      def permissions, do: []
+    end
+
+    @tag capture_log: true
+    test "a malformed start/2 return is an error + idle, not a dead session", %{socket: s} do
+      MobSpeech.listen(s, engine: BadReturnEngine)
+      assert drain() == [{:speech, :error, :client}, {:speech, :state, :idle}]
     end
 
     test "the session goes away with its screen and cancels the engine" do
