@@ -70,7 +70,8 @@ defmodule MobSpeech do
   under `assigns.mob_speech`, so `stop/1` and `cancel/1` reach it.
 
   Listening again while this socket already has a session cancels the old one
-  first: its target gets its idle before any event of the new session.
+  first: its target gets its idle before any event of the new session (unless
+  the old engine is stuck in a callback for over 1 s).
 
   Options:
 

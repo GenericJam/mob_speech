@@ -140,7 +140,7 @@ object MobSpeechBridge : io.mob.plugin.MobActivityAware, io.mob.plugin.MobPermis
         }
 
         // One recognition at a time: a new session preempts the running one,
-        // whose screen gets a bare idle (same as a cancel).
+        // whose session gets an idle (same as a cancel).
         val previous = activePid
         activePid = 0
         if (previous != 0L) nativeDeliverState(previous, STATE_IDLE)

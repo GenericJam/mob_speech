@@ -433,6 +433,26 @@ defmodule MobSpeech.SessionTest do
       assert drain() == [{:speech, :error, :client}, {:speech, :state, :idle}]
     end
 
+    defmodule SlowStopEngine do
+      @behaviour MobSpeech.Engine
+      def start(pid, _opts), do: send(pid, {:speech, :state, :listening}) && :ok
+      def stop(_pid), do: Process.sleep(200)
+      def cancel(_pid), do: :ok
+      def available?, do: true
+      def permissions, do: []
+    end
+
+    test "a cancel that times out leaves no stray ack in the caller's mailbox", %{socket: s} do
+      s = MobSpeech.listen(s, engine: SlowStopEngine, stop_timeout_ms: 60_000)
+      assert_receive {:speech, :state, :listening}
+      %{session: session} = s.assigns.mob_speech
+      MobSpeech.stop(s)
+      # The session is stuck in stop/1 for 200 ms; give up on the ack after 20.
+      MobSpeech.Session.cancel(session, 20)
+      assert_receive {:speech, :state, :idle}, 1_000
+      refute_receive {_ref, :cancelled}, 300
+    end
+
     test "the session goes away with its screen and cancels the engine" do
       me = self()
 

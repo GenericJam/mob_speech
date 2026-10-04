@@ -48,15 +48,15 @@ defmodule MobSpeech.Session do
           | {:speech, :final, String.t()}
           | {:speech, :error, Reason.t()}
 
-  @typedoc "Who to tell once a cancel has emitted its idle: `{pid, tag}` or `nil`."
-  @type ack :: {pid(), reference()} | nil
+  @typedoc "Who to tell once a cancel has emitted its idle: `{pid_or_alias, tag}` or `nil`."
+  @type ack :: {pid() | reference(), reference()} | nil
 
   @type input ::
           {:engine, term()} | :stop | {:cancel, ack()} | :watchdog | :target_down
 
   @type effect ::
           {:emit, event()}
-          | {:ack, {pid(), reference()}}
+          | {:ack, {pid() | reference(), reference()}}
           | {:engine, :stop | :cancel}
           | {:watchdog, non_neg_integer()}
 
@@ -194,8 +194,10 @@ defmodule MobSpeech.Session do
   """
   @spec cancel(pid(), timeout()) :: :ok
   def cancel(session, timeout \\ 1_000) do
-    mref = Process.monitor(session)
-    send(session, {:mob_speech, :cancel, {self(), mref}})
+    # The monitor ref doubles as an alias: once demonitored, a late ack sent
+    # to it is dropped instead of landing in the caller's (screen's) mailbox.
+    mref = Process.monitor(session, alias: :demonitor)
+    send(session, {:mob_speech, :cancel, {mref, mref}})
 
     receive do
       {^mref, :cancelled} -> :ok
