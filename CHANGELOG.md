@@ -4,7 +4,7 @@ All notable changes to **mob_speech** are documented here.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## 0.1.1 - 2026-10-09
 
 ### Added
 - **On-device self-test** (MOB-418). `MobSpeech.SelfTest` implements
@@ -15,10 +15,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   Android 11+ `<queries>` entry) and iOS "not authorised" / "no recogniser
   for the locale" / "recogniser off" skip; a bridge that could not answer
   fails. Run it with `mix mob.selftest` from a host app (mob_dev 0.7.17).
-  Requires mob 0.9.15; `mob_version` in the manifest is now `~> 0.9`.
 
 ### Changed
-- **`speech_available/0` says why it is not `true`.** Android answers
+- **Requires mob >= 0.9.15** (was `~> 0.7`), for `Mob.Plugin.SelfTest`;
+  `mob_version` in the manifest is now `~> 0.9` (was `~> 0.7`).
+- **Internal: the `:mob_speech_nif.speech_available/0` NIF says why it is
+  not `true`** (used by `MobSpeech.SelfTest`). Android answers
   `{:error, :bridge_not_registered | :no_jni_env | :no_activity |
   :bridge_call_failed}` instead of `false` when the Kotlin bridge could not
   answer (`MobSpeechBridge.speech_available()` now returns an `Int` code,
