@@ -54,7 +54,7 @@ export fn Java_io_mob_speech_MobSpeechBridge_nativeRegister(jenv: *jni.JNIEnv, c
     g_speech.start = cacheMethod(jenv, cls, "speech_start", "(JLjava/lang/String;ZZI)V");
     g_speech.stop = cacheMethod(jenv, cls, "speech_stop", "(J)V");
     g_speech.cancel = cacheMethod(jenv, cls, "speech_cancel", "(J)V");
-    g_speech.available = cacheMethod(jenv, cls, "speech_available", "()Z");
+    g_speech.available = cacheMethod(jenv, cls, "speech_available", "()I");
 }
 
 // ── Thread-attach + pid round-trip helpers (mirror mob-core) ──────────────
@@ -186,16 +186,37 @@ fn nif_speech_cancel(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL
     return callPidOnly(env, g_speech.cancel, pid);
 }
 
+// MobSpeechBridge.speech_available() codes. 0 is never returned by Kotlin: it is
+// what CallStaticIntMethod yields when the call threw.
+const AVAIL_NO: jni.JInt = 1;
+const AVAIL_YES: jni.JInt = 2;
+const AVAIL_NO_ACTIVITY: jni.JInt = 3;
+
+fn errorAtom(env: ?*erts.ErlNifEnv, comptime reason: [:0]const u8) erts.ERL_NIF_TERM {
+    return erts.errorTuple(env, erts.atom(env, reason));
+}
+
+// true | false (no recogniser service visible to the app), or {error, Why} when
+// the bridge could not answer: bridge_not_registered (nativeRegister never ran
+// or the method-ID lookup failed), no_jni_env, no_activity (the bootstrap never
+// handed the bridge an Activity), bridge_call_failed (the Kotlin call threw).
+// MobSpeech.available?/0 treats all of those as false; MobSpeech.SelfTest
+// turns them into failures (MOB-418).
 fn nif_speech_available(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_NIF_TERM) callconv(.c) erts.ERL_NIF_TERM {
     _ = argc;
     _ = argv;
-    if (g_speech_cls == null or g_speech.available == null) return erts.atom(env, "false");
+    if (g_speech_cls == null or g_speech.available == null) return errorAtom(env, "bridge_not_registered");
     var attached: c_int = 0;
-    const jenv = get_jenv(&attached) orelse return erts.atom(env, "false");
-    const ok = jenv.*.CallStaticBooleanMethod.?(jenv, g_speech_cls, g_speech.available);
+    const jenv = get_jenv(&attached) orelse return errorAtom(env, "no_jni_env");
+    const code = jenv.*.CallStaticIntMethod.?(jenv, g_speech_cls, g_speech.available);
     jni.exceptionClear(jenv);
     detachIfAttached(attached);
-    return if (ok != 0) erts.atom(env, "true") else erts.atom(env, "false");
+    return switch (code) {
+        AVAIL_YES => erts.atom(env, "true"),
+        AVAIL_NO => erts.atom(env, "false"),
+        AVAIL_NO_ACTIVITY => errorAtom(env, "no_activity"),
+        else => errorAtom(env, "bridge_call_failed"),
+    };
 }
 
 // ── NIF table + init entry point ─────────────────────────────────────────

@@ -32,5 +32,11 @@ speech_stop(_Pid) ->
 speech_cancel(_Pid) ->
     erlang:nif_error(nif_not_loaded).
 
+%% true | false | {error, Why}. false: no recogniser is available (Android: no
+%% RecognitionService visible to the app; iOS: authorised, but Siri/dictation is
+%% off or there is no network). {error, Why} says why the native side could not
+%% answer yes: Android bridge_not_registered | no_jni_env | no_activity |
+%% bridge_call_failed; iOS unsupported_locale | not_authorized.
+%% MobSpeech.available?/0 is true only for true; MobSpeech.SelfTest reads the rest.
 speech_available() ->
     erlang:nif_error(nif_not_loaded).
