@@ -329,11 +329,26 @@ static ERL_NIF_TERM nif_speech_cancel(ErlNifEnv *env, int argc, const ERL_NIF_TE
     return enif_make_atom(env, "ok");
 }
 
+static ERL_NIF_TERM error_atom(ErlNifEnv *env, const char *reason) {
+    return enif_make_tuple2(env, enif_make_atom(env, "error"), enif_make_atom(env, reason));
+}
+
+/* true, or why not: {error, unsupported_locale} (no recogniser for the device
+ * locale), {error, not_authorized} (speech recognition not authorised yet),
+ * false (authorised but the recogniser is unavailable: Siri/dictation off or
+ * no network). MobSpeech.available?/0 treats every non-true answer as false;
+ * MobSpeech.SelfTest tells them apart (MOB-418). */
 static ERL_NIF_TERM nif_speech_available(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     (void)argv;
     SFSpeechRecognizer *rec = [[SFSpeechRecognizer alloc] init];
-    return enif_make_atom(env, (rec && rec.isAvailable) ? "true" : "false");
+    if (rec && rec.isAvailable)
+        return enif_make_atom(env, "true");
+    if (!rec)
+        return error_atom(env, "unsupported_locale");
+    if ([SFSpeechRecognizer authorizationStatus] != SFSpeechRecognizerAuthorizationStatusAuthorized)
+        return error_atom(env, "not_authorized");
+    return enif_make_atom(env, "false");
 }
 
 static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {

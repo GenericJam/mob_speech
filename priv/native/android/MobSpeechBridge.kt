@@ -56,6 +56,12 @@ object MobSpeechBridge : io.mob.plugin.MobActivityAware, io.mob.plugin.MobPermis
     private const val ERR_NO_RECOGNIZER = -2
     private const val ERR_NO_CONTEXT = -3
 
+    // speech_available() codes, read by nif_speech_available in
+    // mob_speech_nif.zig. 0 is reserved: it is what JNI yields when the call threw.
+    private const val AVAIL_NO = 1
+    private const val AVAIL_YES = 2
+    private const val AVAIL_NO_ACTIVITY = 3
+
     @JvmStatic external fun nativeRegister()
 
     // {:speech, :state, :listening | :idle}
@@ -87,9 +93,9 @@ object MobSpeechBridge : io.mob.plugin.MobActivityAware, io.mob.plugin.MobPermis
             PackageManager.PERMISSION_GRANTED
 
     @JvmStatic
-    fun speech_available(): Boolean {
-        val ctx = context() ?: return false
-        return SpeechRecognizer.isRecognitionAvailable(ctx)
+    fun speech_available(): Int {
+        val ctx = context() ?: return AVAIL_NO_ACTIVITY
+        return if (SpeechRecognizer.isRecognitionAvailable(ctx)) AVAIL_YES else AVAIL_NO
     }
 
     @JvmStatic

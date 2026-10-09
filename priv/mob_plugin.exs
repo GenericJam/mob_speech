@@ -1,8 +1,11 @@
 %{
   name: :mob_speech,
-  mob_version: "~> 0.7",
+  mob_version: "~> 0.9",
   plugin_spec_version: 1,
   description: "Speech-to-text (Android SpeechRecognizer / iOS SFSpeechRecognizer)",
+  # On-device proof for `mix mob.selftest` / mob_ci: speech_available/0
+  # through the NIF and the Kotlin bridge / SFSpeechRecognizer (see Mob.Plugin.SelfTest).
+  selftest: MobSpeech.SelfTest,
   # A sample screen the host can navigate to by route. Pure-Elixir +
   # hot-pushable; drop it and this entry in a real app that builds its own UI.
   screens: [

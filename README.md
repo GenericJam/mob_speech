@@ -126,6 +126,9 @@ mix setup   # deps + git hooks (format, credo --strict, compile; tests when mix.
 mix test
 ```
 
+On-device self-test (`MobSpeech.SelfTest`): run `mix mob.selftest` from a host
+app that depends on mob_speech (mob_dev >= 0.7.17).
+
 ## License
 
 MIT
